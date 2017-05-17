@@ -14,14 +14,42 @@ usage() {
     echo "  -m http_method: HTTP method to sign - e.g. PUT (default ${S3_HTTP_METHOD})"
     echo "  -a access_key: S3 Access Key (default ${S3_ACCESS_KEY})"
     echo "  -s seconds: how long the signed url will be valid (default ${SECONDS})"
+    echo "  -p: use path style (e.g. https://example.com/bucket) for buckets instead of the default hosted style (e.g. https://bucket.example.com)"
+    echo "  -c configfile: which s3cfg configuration file to use"
     echo "  -h: to see this text"
 }
 
 set_access_key() {
     # extract access key from .s3cfg
-    if [ -e "${HOME}/.s3cfg" ]; then
-        S3_ACCESS_KEY=$(sed -n 's/^access_key = //p' "${HOME}/.s3cfg")
+    if [ -e "${S3CFG}" ]; then
+        S3_ACCESS_KEY=$(sed -n 's/^access_key = //p' "${S3CFG}")
     fi
+}
+
+set_secret_key() {
+    # extract secret key from .s3cfg
+    if [ -e "${S3CFG}" ]; then
+        S3_SECRET_KEY=$(sed -n 's/^secret_key = //p' "${S3CFG}")
+    fi
+}
+
+set_host_base() {
+    # extract host base from .s3cfg
+    if [ -e "${S3CFG}" ]; then
+        S3_HOST_BASE=$(sed -n 's/^host_base = //p' "${S3CFG}")
+    fi
+}
+
+# https://gist.github.com/cdown/1163649#gistcomment-1914130
+function urlencode() {
+        local LANG=C
+        for ((i=0;i<${#1};i++)); do
+                if [[ ${1:$i:1} =~ ^[a-zA-Z0-9\.\~\_\-]$ ]]; then
+                        printf "${1:$i:1}"
+                else
+                        printf '%%%02X' "'${1:$i:1}"
+                fi
+        done
 }
 
 create_signed_url() {
@@ -29,25 +57,38 @@ create_signed_url() {
     TIMESTAMP=$((`date +%s` + ${SECONDS}))
     # string to sign: method + expiration-time + bucket/object
     local can_string="${S3_HTTP_METHOD}\n\n\n${TIMESTAMP}\n/${S3_BUCKET}/${S3_OBJECT}"
+    #echo "about to sign:"
+    #echo "----"
+    #echo ${can_string}
+    #echo "----"
     # generate the signature
-    SIGNATURE=$(s3cmd sign "$(echo -e "$can_string")" | sed -n 's/^Signature: //p')
+    #SIGNATURE=$(s3cmd sign "$(echo -e "$can_string")" | sed -n 's/^Signature: //p')
+    SIGNATURE=$(echo -en $can_string |
+      openssl dgst -sha1 -binary -hmac "${S3_SECRET_KEY}" |
+      openssl base64)
     if [ -z "$SIGNATURE" ]; then
         echo "Failed to created signed URL for '${S3_OBJECT}' in bucket '${S3_BUCKET}'" >&2
         exit 4
     fi
+    SIGNATURE=$(urlencode $SIGNATURE)
 }
 
 output() {
-    local base_url="https://${S3_BUCKET}.s3.amazonaws.com/${S3_OBJECT}"
+    if [ "$S3_PATH_STYLE" = true ]; then
+        local base_url="https://${S3_HOST_BASE}/${S3_BUCKET}/${S3_OBJECT}"
+    else
+        local base_url="https://${S3_BUCKET}.${S3_HOST_BASE}/${S3_OBJECT}"
+    fi
+
     local params="AWSAccessKeyId=${S3_ACCESS_KEY}&Expires=${TIMESTAMP}&Signature=${SIGNATURE}"
     echo "$base_url?$params"
 }
 
-set_access_key
 SECONDS=3600
 S3_HTTP_METHOD="GET"
+S3CFG="${HOME}/.s3cfg"
 
-while getopts "hb:o:m:a:s:" OPT; do
+while getopts "phb:o:m:a:c:s:" OPT; do
     case "$OPT" in
         h)
             usage
@@ -65,11 +106,22 @@ while getopts "hb:o:m:a:s:" OPT; do
         a)
             S3_ACCESS_KEY="${OPTARG}"
             ;;
+        p)
+            S3_PATH_STYLE=true
+            ;;
+
+        c)
+            S3CFG="${OPTARG}"
+            ;;
         s)
             SECONDS="${OPTARG}"
             ;;
     esac
 done
+
+set_access_key
+set_secret_key
+set_host_base
 
 if [ -z "$S3_ACCESS_KEY" ]; then
     echo "Please provide your S3 access key."
